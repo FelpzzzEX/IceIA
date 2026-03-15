@@ -208,8 +208,10 @@ __marimo__/
 
 # os dados brutos podem ser acessados através do drive
 /data/raw
+/data/chunked_log.txt
 
 qdrant_data/
 redis_data/
 
 /docker-compose.override.yml
+

@@ -1,5 +1,5 @@
 import json
-import time
+import os
 from pathlib import Path
 from qdrant_client import QdrantClient
 from dotenv import load_dotenv
@@ -9,6 +9,7 @@ from llama_index.core.node_parser import HierarchicalNodeParser, get_leaf_nodes
 from llama_index.vector_stores.qdrant import QdrantVectorStore
 from llama_index.storage.docstore.redis import RedisDocumentStore
 from llama_index.embeddings.ollama import OllamaEmbedding
+from llama_index.core.ingestion import IngestionPipeline
 
 load_dotenv()
 
@@ -21,6 +22,7 @@ Settings.embed_model = OllamaEmbedding(
 # diretorios (talvez precise mudar, idk)
 BASE_DIR = Path(__file__).parent.parent
 PROCESSED_DIR = BASE_DIR / 'data' / 'processed'
+LOG_DIR = BASE_DIR / 'data' / 'chunked_log.txt'
 
 # definição do banco vetorial (usando docker)
 qdrant_client = QdrantClient(url='http://localhost:6333')
@@ -49,16 +51,35 @@ node_parser = HierarchicalNodeParser.from_defaults(
     chunk_overlap=50
 )
 
+def load_log():
+    if not LOG_DIR.exists():
+        LOG_DIR.touch()
+        return ""
+    with open(LOG_DIR, 'r') as l:
+        log = l.read()
+    return log
+        
+def save_log(file_name: str):
+    with open(LOG_DIR, 'a') as f:
+        f.write(f'{file_name}\n')
+
 def split_and_save(path: str):
     """
     Lê um JSON processado, divide o texto em nós hierárquicos
-    e persiste:
+    e persiste caso ainda não tenha sido processado. 
     - nós pais no Redis Document Store;
     - nós folha no Qdrant para indexação vetorial.
 
     Args:
         path: caminho para o arquivo JSON processado.
     """
+    file_name = Path(path).stem
+    already_processed = load_log()
+    
+    # checa se o arquivo ja foi processado
+    if file_name in already_processed:
+        return
+    
     print(f"Lendo o arquivo: {path}...")
     with open(path, 'r', encoding='utf-8') as j:
         markdown = json.load(j)
@@ -85,6 +106,10 @@ def split_and_save(path: str):
         nodes=leaf_nodes,
         storage_context=storage_context
     )
+    
+    # salva o arquivo no log
+    print(f'Arquivo {file_name} processado e adicionado ao log!')
+    save_log(file_name)
         
 if __name__ == "__main__":
     arquivos = list(PROCESSED_DIR.glob("*.json"))
@@ -93,8 +118,6 @@ if __name__ == "__main__":
     for doc in arquivos:
         try:
             split_and_save(str(doc))
-            # Pausa de 3 segundos para respeitar o limite de requisições gratuitas do Gemini
-            time.sleep(3) 
         except Exception as e:
             print(f"Erro ao processar {doc.name}: {e}")
             continue
