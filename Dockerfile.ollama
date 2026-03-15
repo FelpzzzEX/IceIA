@@ -1,0 +1,7 @@
+# Usa a imagem oficial como base
+FROM ollama/ollama:latest
+
+# O Ollama exige que o servidor esteja rodando para aceitar o comando "pull".
+# Nós subimos ele em background, esperamos 5 segundos para garantir,
+# baixamos o Qwen3 e a camada do Docker é salva com o modelo embutido!
+RUN nohup bash -c "ollama serve &" && sleep 5 && ollama pull qwen3-embedding:0.6b
