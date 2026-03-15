@@ -131,15 +131,28 @@ def clean_markdown(texto: str) -> str:
     # corrige hifenização por quebra de linha (informa-\nção -> informação)
     texto = re.sub(r"([A-Za-zÀ-ÖØ-öø-ÿ])-\n([A-Za-zÀ-ÖØ-öø-ÿ])", r"\1\2", texto)
 
-    # remove cabeçalhos/rodapés repetitivos (linha a linha)
+    # remove cabeçalhos/rodapés repetitivos (linha a linha), sem depender de um curso/campus específico
     padroes = [
         r"^\s*#*\s*[\·\-\*]?\s*MINIST[ÉE]RIO DA EDUCA[ÇC][ÃA]O.*$",
-        r"^\s*#*\s*[\·\-\*]?\s*UNIVERSIDADE FEDERAL DE OURO PRETO.*$",
-        r"^\s*#*\s*[\·\-\*]?\s*INSTITUTO DE CI[ÊE]NCIAS EXATAS E APLICADAS.*$",
-        r"^\s*#*\s*[\·\-\*]?\s*COLEGIADO DO CURSO DE SISTEMAS DE INFORMA[ÇC][ÃA]O.*$",
-        r"^\s*#*\s*REITORIA\s*$",
-        r"^\s*P[ÁA]G\.?\s*\d+(\s*de\s*\d+)?\s*$"
+        r"^\s*#*\s*[\·\-\*]?\s*UNIVERSIDADE\s+FEDERAL\b.*$",
+        r"^\s*#*\s*[\·\-\*]?\s*INSTITUTO\b.*$",
+        r"^\s*#*\s*[\·\-\*]?\s*COLEGIADO\s+(DO|DE)\s+CURSO\b.*$",
+        r"^\s*#*\s*[\·\-\*]?\s*REITORIA\s*$",
+        r"^\s*#*\s*[\·\-\*]?\s*CAMPUS\b.*$",
+        r"^\s*P([ÁA]G|[ÁA]GINA)\.?\s*\d+(\s*(de|/)\s*\d+)?\s*$",
+        r"^\s*(Rua|Av\.?|Avenida|Rod\.?|Rodovia)\s+.*\bCEP\b.*$"
     ]
+    padroes_compilados = [re.compile(p, flags=re.IGNORECASE) for p in padroes]
+
+    palavras_institucionais = (
+        "universidade", "instituto", "colegiado", "departamento", "campus",
+        "reitoria", "pro-reitoria", "pro reitoria", "secretaria", "diretoria"
+    )
+
+    def _normalize_ascii_minusculo(valor: str) -> str:
+        decomposto = unicodedata.normalize("NFKD", valor)
+        sem_acentos = "".join(ch for ch in decomposto if not unicodedata.combining(ch))
+        return sem_acentos.casefold()
 
     linhas_limpa = []
     for linha in texto.splitlines():
@@ -147,7 +160,23 @@ def clean_markdown(texto: str) -> str:
         if not l:
             linhas_limpa.append("")
             continue
-        if any(re.match(p, l, flags=re.IGNORECASE) for p in padroes):
+        if any(p.match(l) for p in padroes_compilados):
+            continue
+
+        # Heurística conservadora para cabeçalhos em caixa alta com termos institucionais.
+        # Evita acoplamento a nomes específicos de unidade/campus.
+        l_sem_marcadores = re.sub(r"^[#\-\*\·\s]+", "", l)
+        tokens = re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ]{3,}", l_sem_marcadores)
+        if tokens:
+            tokens_maiusculos = sum(1 for t in tokens if t == t.upper())
+            razao_maiusculas = tokens_maiusculos / len(tokens)
+            l_normalizada = _normalize_ascii_minusculo(l_sem_marcadores)
+            tem_palavra_institucional = any(p in l_normalizada for p in palavras_institucionais)
+            if razao_maiusculas >= 0.7 and tem_palavra_institucional and len(l_sem_marcadores) <= 120:
+                continue
+
+        l_normalizada = _normalize_ascii_minusculo(l_sem_marcadores)
+        if " bairro " in f" {l_normalizada} " and " cep " in f" {l_normalizada} ":
             continue
         linhas_limpa.append(l)
 
