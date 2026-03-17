@@ -5,11 +5,10 @@ from qdrant_client import QdrantClient
 from dotenv import load_dotenv
 
 from llama_index.core import Document, StorageContext, VectorStoreIndex, Settings
-from llama_index.core.node_parser import HierarchicalNodeParser, get_leaf_nodes
+from llama_index.core.node_parser import HierarchicalNodeParser, MarkdownNodeParser, SentenceSplitter, get_leaf_nodes
 from llama_index.vector_stores.qdrant import QdrantVectorStore
 from llama_index.storage.docstore.redis import RedisDocumentStore
 from llama_index.embeddings.ollama import OllamaEmbedding
-from llama_index.core.ingestion import IngestionPipeline
 
 load_dotenv()
 
@@ -45,10 +44,20 @@ storage_context = StorageContext.from_defaults(
 )
 
 # usando uma abordagem hierarquica, os nós filhos sãp usados para buscar (mais preciso)
-# os nós pais são usados para maior contexto
-node_parser = HierarchicalNodeParser.from_defaults(
-    chunk_sizes=[2048, 512, 128],
-    chunk_overlap=50
+# os nós pais são usados para maior contexto (usando a seçao do markdown)
+node_parsers = [
+    MarkdownNodeParser(),
+    SentenceSplitter(chunk_size=512, chunk_overlap=80),
+    SentenceSplitter(chunk_size=128, chunk_overlap=20)
+]
+
+node_parser = HierarchicalNodeParser(
+    node_parser_ids=['markdown', 'medium', 'small'],
+    node_parser_map={
+        'markdown': node_parsers[0],
+        'medium': node_parsers[1],
+        'small': node_parsers[2]
+    }
 )
 
 def load_log():
@@ -74,13 +83,15 @@ def split_and_save(path: str):
         path: caminho para o arquivo JSON processado.
     """
     file_name = Path(path).stem
-    already_processed = load_log()
+    log = load_log()
+    processed = set(log.splitlines())
     
     # checa se o arquivo ja foi processado
-    if file_name in already_processed:
+    if file_name in processed:
+        print('Arquivo já processado, pulando...')
         return
     
-    print(f"Lendo o arquivo: {path}...")
+    print(f"Lendo o arquivo: {file_name}...")
     with open(path, 'r', encoding='utf-8') as j:
         markdown = json.load(j)
 
@@ -99,13 +110,15 @@ def split_and_save(path: str):
     # todos os chunks gerados são salvos
     all_nodes = node_parser.get_nodes_from_documents(documentos_brutos)
     storage_context.docstore.add_documents(all_nodes)
+    print(f'Salvando {len(all_nodes)} nós...')
     
     # separando os leaf e salvando no banco vetorial para busca
     leaf_nodes = get_leaf_nodes(all_nodes)
-    index = VectorStoreIndex(
+    _ = VectorStoreIndex(
         nodes=leaf_nodes,
         storage_context=storage_context
     )
+    print(f'Salvando {len(leaf_nodes)} nós para indexação...')
     
     # salva o arquivo no log
     print(f'Arquivo {file_name} processado e adicionado ao log!')
@@ -114,7 +127,6 @@ def split_and_save(path: str):
 if __name__ == "__main__":
     arquivos = list(PROCESSED_DIR.glob("*.json"))
     print(f"Iniciando ingestão de {len(arquivos)} arquivos...")
-    
     for doc in arquivos:
         try:
             split_and_save(str(doc))
