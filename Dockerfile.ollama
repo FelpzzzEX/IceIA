@@ -1,5 +1,5 @@
-# Usa a imagem oficial como base
-FROM ollama/ollama:latest
+# Usa a imagem oficial como base - versão fixa para garantir estabilidade
+FROM ollama/ollama:0.18.0
 
 # O Ollama exige que o servidor esteja rodando para aceitar o comando "pull".
 # Nós subimos ele em background, esperamos 5 segundos para garantir,
