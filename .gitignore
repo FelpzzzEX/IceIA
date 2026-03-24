@@ -215,3 +215,7 @@ redis_data/
 
 /docker-compose.override.yml
 
+# manter local
+/explain
+splitter_explain.py
+embedder_explain.py

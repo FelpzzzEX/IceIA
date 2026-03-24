@@ -1,50 +1,32 @@
 import json
-import os
 from pathlib import Path
 from qdrant_client import QdrantClient
 from dotenv import load_dotenv
 
-from llama_index.core import Document, StorageContext, VectorStoreIndex, Settings
-from llama_index.core.node_parser import HierarchicalNodeParser, MarkdownNodeParser, SentenceSplitter, get_leaf_nodes
-from llama_index.vector_stores.qdrant import QdrantVectorStore
+from llama_index.core import Document, StorageContext
+from llama_index.core.node_parser import HierarchicalNodeParser, MarkdownNodeParser, SentenceSplitter
 from llama_index.storage.docstore.redis import RedisDocumentStore
-from llama_index.embeddings.ollama import OllamaEmbedding
 
 load_dotenv()
 
-# definição do modelo de embedding
-Settings.embed_model = OllamaEmbedding(
-    model_name='qwen3-embedding:0.6b',
-    base_url='http://localhost:11434'
-)
-
-# diretorios (talvez precise mudar, idk)
+# diretorios
 BASE_DIR = Path(__file__).parent.parent
 PROCESSED_DIR = BASE_DIR / 'data' / 'processed'
 LOG_DIR = BASE_DIR / 'data' / 'chunked_log.txt'
 
-# definição do banco vetorial (usando docker)
-qdrant_client = QdrantClient(url='http://localhost:6333')
-vector_store = QdrantVectorStore(
-    client=qdrant_client,
-    collection_name='documentos_iceia'
-)
-
-# banco de documentos para salvar os chunks maiores
+# banco de documentos para salvar os chunks (todos os níveis da hierarquia)
 doc_store = RedisDocumentStore.from_host_and_port(
     host='localhost',
     port=6379,
     namespace='documentos_iceia'
 )
 
-# liga docstore (chunks pais) e vector_store (chunks folha) para persistir e buscar
 storage_context = StorageContext.from_defaults(
-    docstore=doc_store,
-    vector_store=vector_store
+    docstore=doc_store
 )
 
-# usando uma abordagem hierarquica, os nós filhos sãp usados para buscar (mais preciso)
-# os nós pais são usados para maior contexto (usando a seçao do markdown)
+# abordagem hierarquica: nós filhos para busca (mais preciso),
+# nós pais para maior contexto (seção do markdown)
 node_parsers = [
     MarkdownNodeParser(),
     SentenceSplitter(chunk_size=512, chunk_overlap=80),
@@ -60,24 +42,25 @@ node_parser = HierarchicalNodeParser(
     }
 )
 
-def load_log():
+
+def load_log() -> str:
     if not LOG_DIR.exists():
         LOG_DIR.touch()
         return ""
     with open(LOG_DIR, 'r') as l:
-        log = l.read()
-    return log
-        
+        return l.read()
+
+
 def save_log(file_name: str):
     with open(LOG_DIR, 'a') as f:
         f.write(f'{file_name}\n')
 
+
 def split_and_save(path: str):
     """
     Lê um JSON processado, divide o texto em nós hierárquicos
-    e persiste caso ainda não tenha sido processado. 
-    - nós pais no Redis Document Store;
-    - nós folha no Qdrant para indexação vetorial.
+    e persiste todos os nós no Redis Document Store.
+    Documentos já processados são ignorados.
 
     Args:
         path: caminho para o arquivo JSON processado.
@@ -85,12 +68,11 @@ def split_and_save(path: str):
     file_name = Path(path).stem
     log = load_log()
     processed = set(log.splitlines())
-    
-    # checa se o arquivo ja foi processado
+
     if file_name in processed:
         print('Arquivo já processado, pulando...')
         return
-    
+
     print(f"Lendo o arquivo: {file_name}...")
     with open(path, 'r', encoding='utf-8') as j:
         markdown = json.load(j)
@@ -106,27 +88,18 @@ def split_and_save(path: str):
         for item in markdown
         if isinstance(item, dict)
     ]
-    
-    # todos os chunks gerados são salvos
+
     all_nodes = node_parser.get_nodes_from_documents(documentos_brutos)
     storage_context.docstore.add_documents(all_nodes)
-    print(f'Salvando {len(all_nodes)} nós...')
-    
-    # separando os leaf e salvando no banco vetorial para busca
-    leaf_nodes = get_leaf_nodes(all_nodes)
-    _ = VectorStoreIndex(
-        nodes=leaf_nodes,
-        storage_context=storage_context
-    )
-    print(f'Salvando {len(leaf_nodes)} nós para indexação...')
-    
-    # salva o arquivo no log
-    print(f'Arquivo {file_name} processado e adicionado ao log!')
+    print(f'Salvando {len(all_nodes)} nós no Redis...')
+
     save_log(file_name)
-        
+    print(f'Arquivo {file_name} processado e adicionado ao log!')
+
+
 if __name__ == "__main__":
     arquivos = list(PROCESSED_DIR.glob("*.json"))
-    print(f"Iniciando ingestão de {len(arquivos)} arquivos...")
+    print(f"Iniciando chunking de {len(arquivos)} arquivos...")
     for doc in arquivos:
         try:
             split_and_save(str(doc))
