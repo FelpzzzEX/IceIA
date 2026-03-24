@@ -1,0 +1,10 @@
+pydantic
+python-dotenv
+qdrant-client
+llama-index
+redis
+langchain-google-genai
+langchain-docling
+docling
+docling-core
+ollama

@@ -1,5 +1,4 @@
-from langchain_docling.loader import ExportType, DoclingLoader
-from docling_core.types.doc.document import ContentLayer
+from docling.document_converter import DocumentConverter
 from pathlib import Path
 import json
 from typing import Optional, cast
@@ -9,6 +8,8 @@ from dotenv import load_dotenv
 import time
 import re
 import unicodedata
+import os
+import logging
 
 # para esse arquivo ainda falta criar uma função que lê os arquivos brutos diretamente da fonte. Acredito que também seria interessante criar um dag para fazer esse processo de tempos em tempos.
 
@@ -17,6 +18,9 @@ load_dotenv()
 BASE_DIR = Path(__file__).parent.parent
 RAW_DIR = BASE_DIR / 'data' / 'raw'
 PROCESSED_DIR = BASE_DIR / 'data' / 'processed'
+MARKDOWN_DIR = BASE_DIR / 'data' / 'markdown'
+
+FOLDERS = [RAW_DIR, PROCESSED_DIR, MARKDOWN_DIR]
 
 PROMPT = """Você é um assistente especializado em análise de documentos acadêmicos da UFOP.
 
@@ -58,46 +62,71 @@ llm = ChatGoogleGenerativeAI(
 )
 extrator = llm.with_structured_output(MetadadosEstruturados)
 
+# caso a pasta não exista, é criada
+for f in FOLDERS:
+    os.makedirs(f, exist_ok=True)
+
+converter = DocumentConverter()
+
 def load_data(path: str):
     """
     Carrega um PDF, extrai seu conteúdo em Markdown via Docling e salva em JSON
-    na pasta processed. Metadados estruturados são extraídos via LLM e incorporados
+    na pasta processed (incluindo metadados) e o markdown na pasta markdown (inspeção).
+    Metadados estruturados são extraídos via LLM e incorporados
     aos metadados de cada documento. Documentos já processados são ignorados.
-
+    
     Args:
         path: Caminho absoluto para o arquivo PDF.
     """
-    processed_file = PROCESSED_DIR / (Path(path).stem + ".json")
+    file_path = Path(path)
     
-    if processed_file.exists():
+    # arquivo JSON para etapas futuras e .md para inspeção
+    processed_file = PROCESSED_DIR / f"{file_path.stem}.json"
+    markdown_file = MARKDOWN_DIR / f"{file_path.stem}.md"
+    
+    # retorna se já tiverem sido processados
+    if processed_file.exists() and markdown_file.exists():
+        logging.info(f"Documento {file_path.name} já processado. Ignorando.")
         return
-    
-    loader = DoclingLoader(
-        file_path=path,
-        export_type=ExportType.MARKDOWN,
-        md_export_kwargs={
-            "included_content_layers": [ContentLayer.BODY]
+
+    try:
+        # conversão
+        result = converter.convert(str(file_path))
+        doc = result.document
+        content_md = doc.export_to_markdown()
+
+        if not content_md:
+            logging.warning(f"O documento {file_path.name} retornou vazio.")
+            return
+
+        # markdown limpo
+        content_md = clean_markdown(content_md)
+
+        # extração estruturada de metadados com LLM
+        metadados = extract_metadata(content_md)
+        dict_metadados = metadados.model_dump(exclude_none=True)
+
+        documento = {
+            "id": f"{file_path.stem}_0",
+            "page_content": content_md,
+            "metadata": {
+                "source": file_path.name,
+                **dict_metadados,
+            }
         }
-    )
-    docs = loader.load()
-    if not docs:
-        return
-    
-    for doc in docs:
-        doc.page_content = clean_markdown(doc.page_content)
 
-    content = "\n".join(doc.page_content for doc in docs)
-    metadados = extract_metadata(content)
-    dict_metadados = metadados.model_dump(exclude_none=True)
+        # salva JSON com os metadados
+        with open(processed_file, 'w', encoding='utf-8') as j:
+            json.dump([documento], j, ensure_ascii=False, indent=2)
+        
+        # salva o markdown
+        with open(markdown_file, 'w', encoding='utf-8') as m:
+            m.write(content_md)
+            
+        logging.info(f"Documento {file_path.name} processado com sucesso.")
 
-    for i, doc in enumerate(docs):
-        doc.id = f"{Path(path).stem}_{i}"
-        doc.metadata["source"] = Path(path).name
-        if dict_metadados:
-            doc.metadata.update(dict_metadados)
-
-    with open(processed_file, 'w', encoding='utf-8') as f:
-        json.dump([doc.model_dump() for doc in docs], f)
+    except Exception as e:
+        logging.error(f"Erro ao processar {file_path.name}: {e}")
 
 def extract_metadata(text: str) -> MetadadosEstruturados:
     """
