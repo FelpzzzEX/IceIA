@@ -1,4 +1,6 @@
 from docling.document_converter import DocumentConverter
+from llama_parse import LlamaParse, ResultType
+from llama_index.core import SimpleDirectoryReader
 from pathlib import Path
 import json
 from typing import Optional, cast
@@ -14,6 +16,8 @@ import logging
 # para esse arquivo ainda falta criar uma função que lê os arquivos brutos diretamente da fonte. Acredito que também seria interessante criar um dag para fazer esse processo de tempos em tempos.
 
 load_dotenv()
+
+USE_CLOUD = True
 
 BASE_DIR = Path(__file__).parent.parent
 RAW_DIR = BASE_DIR / 'data' / 'raw'
@@ -66,14 +70,25 @@ extrator = llm.with_structured_output(MetadadosEstruturados)
 for f in FOLDERS:
     os.makedirs(f, exist_ok=True)
 
+# converter docling para processamento local
 converter = DocumentConverter()
 
-def load_data(path: str):
+def save_json(path: Path, content: dict):
+    with open(path, 'w', encoding='utf-8') as j:
+            json.dump(content, j, ensure_ascii=False, indent=2)
+        
+
+def save_markdown(path: Path, content: str):
+    with open(path, 'w', encoding='utf-8') as m:
+            m.write(content)
+
+def local_load_data(path: str):
     """
     Carrega um PDF, extrai seu conteúdo em Markdown via Docling e salva em JSON
     na pasta processed (incluindo metadados) e o markdown na pasta markdown (inspeção).
-    Metadados estruturados são extraídos via LLM e incorporados
-    aos metadados de cada documento. Documentos já processados são ignorados.
+    Metadados estruturados são extraídos via LLM e incorporados aos
+    metadados de cada documento.
+    Documentos já processados são ignorados.
     
     Args:
         path: Caminho absoluto para o arquivo PDF.
@@ -81,11 +96,11 @@ def load_data(path: str):
     file_path = Path(path)
     
     # arquivo JSON para etapas futuras e .md para inspeção
-    processed_file = PROCESSED_DIR / f"{file_path.stem}.json"
-    markdown_file = MARKDOWN_DIR / f"{file_path.stem}.md"
+    PROCESSED_FILE = PROCESSED_DIR / f"{file_path.stem}.json"
+    MARKDOWN_FILE = MARKDOWN_DIR / f"{file_path.stem}.md"
     
     # retorna se já tiverem sido processados
-    if processed_file.exists() and markdown_file.exists():
+    if PROCESSED_FILE.exists() and MARKDOWN_FILE.exists():
         logging.info(f"Documento {file_path.name} já processado. Ignorando.")
         return
 
@@ -108,26 +123,77 @@ def load_data(path: str):
 
         documento = {
             "id": f"{file_path.stem}_0",
-            "page_content": content_md,
             "metadata": {
                 "source": file_path.name,
                 **dict_metadados,
-            }
+            },
+            "page_content": content_md
         }
 
         # salva JSON com os metadados
-        with open(processed_file, 'w', encoding='utf-8') as j:
-            json.dump([documento], j, ensure_ascii=False, indent=2)
+        save_json(PROCESSED_FILE, documento)
         
         # salva o markdown
-        with open(markdown_file, 'w', encoding='utf-8') as m:
-            m.write(content_md)
+        save_markdown(MARKDOWN_FILE, content_md)
             
         logging.info(f"Documento {file_path.name} processado com sucesso.")
 
     except Exception as e:
         logging.error(f"Erro ao processar {file_path.name}: {e}")
 
+def cloud_load_data(path: str):
+    file_path = Path(path)
+    
+    # arquivo JSON para etapas futuras e .md para inspeção
+    PROCESSED_FILE = PROCESSED_DIR / f"{file_path.stem}.json"
+    MARKDOWN_FILE = MARKDOWN_DIR / f"{file_path.stem}.md"
+    
+    # retorna se já tiverem sido processados
+    if PROCESSED_FILE.exists() and MARKDOWN_FILE.exists():
+        logging.info(f"Documento {file_path.name} já processado. Ignorando.")
+        return
+
+    try:
+        # llamaparser para processamento na nuvem
+        # usa chave de api definida no env
+        parser = LlamaParse(
+            result_type=ResultType.MD,
+            language='pt',
+            hide_headers=True,
+            hide_footers=True,
+            split_by_page=False,
+            premium_mode=True,
+            show_progress=True
+        )
+        
+        result = parser.load_data(path)
+        # juntando texto e extraindo metadados
+        content = ''.join(doc.text for doc in result)
+        metadados = extract_metadata(content)
+        
+        dict_metadados = metadados.model_dump(exclude_none=True)
+        
+        documento = {
+            "id": f"{file_path.stem}_0",
+            "metadata": {
+                "source": file_path.name,
+                **dict_metadados,
+            },
+            "page_content": content
+        }
+        
+        # salva JSON com os metadados
+        save_json(PROCESSED_FILE, documento)
+        
+        # salva o markdown
+        save_markdown(MARKDOWN_FILE, content)
+        
+        logging.info(f"Documento {file_path.name} processado com sucesso.")
+
+    except Exception as e:
+        logging.error(f"Erro ao processar {file_path.name}: {e}")
+    
+   
 def extract_metadata(text: str) -> MetadadosEstruturados:
     """
     Envia o texto do documento ao LLM para extração de metadados.
@@ -192,8 +258,8 @@ def clean_markdown(texto: str) -> str:
         if any(p.match(l) for p in padroes_compilados):
             continue
 
-        # Heurística conservadora para cabeçalhos em caixa alta com termos institucionais.
-        # Evita acoplamento a nomes específicos de unidade/campus.
+        # heurística conservadora para cabeçalhos em caixa alta com termos institucionais.
+        # evita acoplamento a nomes específicos de unidade/campus.
         l_sem_marcadores = re.sub(r"^[#\-\*\·\s]+", "", l)
         tokens = re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ]{3,}", l_sem_marcadores)
         if tokens:
@@ -218,5 +284,13 @@ def clean_markdown(texto: str) -> str:
     return texto.strip()
 
 if __name__ == "__main__":
-    for doc in RAW_DIR.glob("*.pdf"):
-        load_data(str(doc))
+    # usa o parser na cluod
+    if USE_CLOUD:
+        for doc in RAW_DIR.glob("*.pdf"):
+            cloud_load_data(str(doc))
+    
+    # caso contrário, usa o parser local (docling)
+    else:
+        for doc in RAW_DIR.glob("*.pdf"):
+            local_load_data(str(doc))
+
