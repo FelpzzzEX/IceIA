@@ -25,23 +25,20 @@ storage_context = StorageContext.from_defaults(
     docstore=doc_store
 )
 
-# abordagem hierarquica: nós filhos para busca (mais preciso),
-# nós pais para maior contexto (seção do markdown)
+# abordagem hierarquica: nó filho para busca (mais preciso),
+# nó pai para maior contexto (seção do markdown)
 node_parsers = [
     MarkdownNodeParser(),
-    SentenceSplitter(chunk_size=512, chunk_overlap=80),
-    SentenceSplitter(chunk_size=128, chunk_overlap=20)
+    SentenceSplitter(chunk_size=512, chunk_overlap=50)
 ]
 
 node_parser = HierarchicalNodeParser(
-    node_parser_ids=['markdown', 'medium', 'small'],
+    node_parser_ids=['markdown', 'small'],
     node_parser_map={
         'markdown': node_parsers[0],
-        'medium': node_parsers[1],
-        'small': node_parsers[2]
+        'small': node_parsers[1]
     }
 )
-
 
 def load_log() -> str:
     if not LOG_DIR.exists():
@@ -50,11 +47,9 @@ def load_log() -> str:
     with open(LOG_DIR, 'r') as l:
         return l.read()
 
-
 def save_log(file_name: str):
     with open(LOG_DIR, 'a') as f:
         f.write(f'{file_name}\n')
-
 
 def split_and_save(path: str):
     """

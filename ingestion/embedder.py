@@ -57,7 +57,6 @@ node_parser = HierarchicalNodeParser(
     }
 )
 
-
 def load_log() -> str:
     if not LOG_DIR.exists():
         LOG_DIR.touch()

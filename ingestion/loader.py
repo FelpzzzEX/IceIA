@@ -1,6 +1,5 @@
 from docling.document_converter import DocumentConverter
 from llama_parse import LlamaParse, ResultType
-from llama_index.core import SimpleDirectoryReader
 from pathlib import Path
 import json
 from typing import Optional, cast
