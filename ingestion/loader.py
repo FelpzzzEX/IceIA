@@ -18,13 +18,19 @@ load_dotenv()
 USE_CLOUD = True
 
 BASE_DIR = Path(__file__).parent.parent
-RAW_DIR = BASE_DIR / 'data' / 'raw'
-PROCESSED_DIR = BASE_DIR / 'data' / 'processed'
-MARKDOWN_DIR = BASE_DIR / 'data' / 'markdown'
+RAW_DIR = BASE_DIR / "data" / "raw"
+PROCESSED_DIR = BASE_DIR / "data" / "processed"
+MARKDOWN_DIR = BASE_DIR / "data" / "markdown"
 
 FOLDERS = [RAW_DIR, PROCESSED_DIR, MARKDOWN_DIR]
 
 METADATA_TEXT_LIMIT = 12000
+
+VIGENCIAS_FILE = BASE_DIR / "data" / "vigencias.json"
+VIGENCIAS = {}
+if VIGENCIAS_FILE.exists():
+    with open(VIGENCIAS_FILE, "r", encoding="utf-8") as f:
+        VIGENCIAS = json.load(f)
 
 PROMPT = """Você é um assistente especializado em análise de documentos acadêmicos da UFOP.
 
@@ -35,36 +41,34 @@ Analise o texto abaixo e extraia os seguintes metadados:
 - **curso**: Curso ao qual o documento se refere, se houver (ex: "Sistemas de Informação", "Engenharia de Produção"). Se for para todos os cursos ou não especificado, retorne null.
 - **data**: Data de emissão do documento no formato YYYY-MM-DD. Se não encontrar, retorne null.
 
-Retorne apenas os dados encontrados explicitamente no texto. Não invente informações.
+Retorne apenas os dados encontrados explicitamente no texto ou inferidos via nome do arquivo. Não invente informações.
 
-Texto:
 {text}"""
+
 
 class MetadadosEstruturados(BaseModel):
     """Metadados extraídos de documentos acadêmicos da UFOP via LLM."""
 
     tipo_documento: Optional[str] = Field(
-        default=None, 
-        description='Tipo do documento (ex: "Resolução", "Portaria", "Instrução Normativa", "Edital")'
+        default=None,
+        description='Tipo do documento (ex: "Resolução", "Portaria", "Instrução Normativa", "Edital")',
     )
     departamento: Optional[str] = Field(
-        default=None, 
-        description='Órgão/conselho emissor (ex: "CEPE", "COSI", "Reitoria"). Extraia apenas a sigla ou nome do órgão.'
+        default=None,
+        description='Órgão/conselho emissor (ex: "CEPE", "COSI", "Reitoria"). Extraia apenas a sigla ou nome do órgão.',
     )
     curso: Optional[str] = Field(
-        default=None, 
-        description='Curso ao qual o documento se refere (ex: "Sistemas de Informação", "Engenharia de Produção"). Retorne null se for geral.'
+        default=None,
+        description='Curso ao qual o documento se refere (ex: "Sistemas de Informação", "Engenharia de Produção"). Retorne null se for geral.',
     )
     data: Optional[str] = Field(
-        default=None, 
-        description='Data de emissão do documento no formato YYYY-MM-DD. Retorne null se não achar.'
+        default=None,
+        description="Data de emissão do documento no formato YYYY-MM-DD. Retorne null se não achar.",
     )
 
+
 # definição do modelo gemini 2.5 flash para extrair metadados (usando api gratuita)
-llm = ChatGoogleGenerativeAI(
-    model='gemini-2.5-flash-lite',
-    temperature=0
-)
+llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash-lite", temperature=0)
 extrator = llm.with_structured_output(MetadadosEstruturados)
 
 # caso a pasta não exista, é criada
@@ -74,41 +78,59 @@ for f in FOLDERS:
 # converter docling para processamento local
 converter = DocumentConverter()
 
+
 def save_json(path: Path, content: dict):
-    with open(path, 'w', encoding='utf-8') as j:
-            json.dump(content, j, ensure_ascii=False, indent=2)
-        
+    with open(path, "w", encoding="utf-8") as j:
+        json.dump(content, j, ensure_ascii=False, indent=2)
+
 
 def save_markdown(path: Path, content: str):
-    with open(path, 'w', encoding='utf-8') as m:
-            m.write(content)
+    with open(path, "w", encoding="utf-8") as m:
+        m.write(content)
 
 
-def extract_metadata(text: str) -> MetadadosEstruturados:
+def extract_metadata(text: str, filename: str = "") -> MetadadosEstruturados:
     """
     Extrai metadados estruturados via LLM.
 
     Usa apenas o início do documento porque os metadados principais normalmente
     estão no cabeçalho/primeira página, e isso evita prompts grandes demais.
+    Também recebe o nome do arquivo, pois muitas vezes carrega datas e regras importantes.
     """
     text_sample = text.strip()[:METADATA_TEXT_LIMIT]
     if not text_sample:
         return MetadadosEstruturados()
 
+    prompt_texto = f"Nome do arquivo lido: {filename}\n\nConteúdo:\n{text_sample}"
+
     try:
-        result = extrator.invoke(PROMPT.format(text=text_sample))
+        result = extrator.invoke(PROMPT.format(text=prompt_texto))
     except Exception as e:
         logging.warning(f"Falha ao extrair metadados via LLM: {e}")
-        return MetadadosEstruturados()
+        result = MetadadosEstruturados()
 
     if isinstance(result, MetadadosEstruturados):
-        return result
+        metadados = result
+    elif isinstance(result, dict):
+        metadados = MetadadosEstruturados.model_validate(result)
+    else:
+        logging.warning(
+            f"Retorno inesperado do extrator de metadados: {type(result).__name__}"
+        )
+        metadados = MetadadosEstruturados()
 
-    if isinstance(result, dict):
-        return MetadadosEstruturados.model_validate(result)
+    return metadados
 
-    logging.warning(f"Retorno inesperado do extrator de metadados: {type(result).__name__}")
-    return MetadadosEstruturados()
+
+def inject_vigencias(file_stem: str, dict_metadados: dict):
+    if file_stem in VIGENCIAS:
+        vig = VIGENCIAS[file_stem]
+        if vig.get("ingressantes_a_partir_de"):
+            dict_metadados["ingressantes_a_partir_de"] = vig["ingressantes_a_partir_de"]
+        if vig.get("ingressantes_ate"):
+            dict_metadados["ingressantes_ate"] = vig["ingressantes_ate"]
+    return dict_metadados
+
 
 def local_load_data(path: str):
     """
@@ -117,16 +139,16 @@ def local_load_data(path: str):
     Metadados estruturados são extraídos via LLM e incorporados aos
     metadados de cada documento.
     Documentos já processados são ignorados.
-    
+
     Args:
         path: Caminho absoluto para o arquivo PDF.
     """
     file_path = Path(path)
-    
+
     # arquivo JSON para etapas futuras e .md para inspeção
     PROCESSED_FILE = PROCESSED_DIR / f"{file_path.stem}.json"
     MARKDOWN_FILE = MARKDOWN_DIR / f"{file_path.stem}.md"
-    
+
     # retorna se já tiverem sido processados
     if PROCESSED_FILE.exists() and MARKDOWN_FILE.exists():
         logging.info(f"Documento {file_path.name} já processado. Ignorando.")
@@ -146,8 +168,11 @@ def local_load_data(path: str):
         content_md = clean_markdown(content_md)
 
         # extração estruturada de metadados com LLM
-        metadados = extract_metadata(content_md)
+        metadados = extract_metadata(content_md, file_path.name)
         dict_metadados = metadados.model_dump(exclude_none=True)
+
+        # aplica manual das vigências se existirem para o arquivo mapeado
+        dict_metadados = inject_vigencias(file_path.stem, dict_metadados)
 
         documento = {
             "id": f"{file_path.stem}_0",
@@ -155,27 +180,28 @@ def local_load_data(path: str):
                 "source": file_path.name,
                 **dict_metadados,
             },
-            "page_content": content_md
+            "page_content": content_md,
         }
 
         # salva JSON com os metadados
         save_json(PROCESSED_FILE, documento)
-        
+
         # salva o markdown
         save_markdown(MARKDOWN_FILE, content_md)
-            
+
         logging.info(f"Documento {file_path.name} processado com sucesso.")
 
     except Exception as e:
         logging.error(f"Erro ao processar {file_path.name}: {e}")
 
+
 def cloud_load_data(path: str):
     file_path = Path(path)
-    
+
     # arquivo JSON para etapas futuras e .md para inspeção
     PROCESSED_FILE = PROCESSED_DIR / f"{file_path.stem}.json"
     MARKDOWN_FILE = MARKDOWN_DIR / f"{file_path.stem}.md"
-    
+
     # retorna se já tiverem sido processados
     if PROCESSED_FILE.exists() and MARKDOWN_FILE.exists():
         logging.info(f"Documento {file_path.name} já processado. Ignorando.")
@@ -185,46 +211,49 @@ def cloud_load_data(path: str):
         # llamaparser para processamento na nuvem
         parser = LlamaParse(
             result_type=ResultType.MD,
-            language='pt',
+            language="pt",
             hide_headers=True,
             hide_footers=True,
             split_by_page=False,
             premium_mode=True,
-            show_progress=True
+            show_progress=True,
         )
-        
+
         result = parser.load_data(path)
         # juntando texto e extraindo metadados
-        content = clean_markdown(''.join(doc.text for doc in result))
+        content = clean_markdown("".join(doc.text for doc in result))
         if not content:
             logging.warning(f"O documento {file_path.name} retornou vazio.")
             return
 
-        metadados = extract_metadata(content)
-        
+        metadados = extract_metadata(content, file_path.name)
+
         dict_metadados = metadados.model_dump(exclude_none=True)
-        
+
+        # aplica manual das vigências se existirem para o arquivo mapeado
+        dict_metadados = inject_vigencias(file_path.stem, dict_metadados)
+
         documento = {
             "id": f"{file_path.stem}_0",
             "metadata": {
                 "source": file_path.name,
                 **dict_metadados,
             },
-            "page_content": content
+            "page_content": content,
         }
-        
+
         # salva JSON com os metadados
         save_json(PROCESSED_FILE, documento)
-        
+
         # salva o markdown
         save_markdown(MARKDOWN_FILE, content)
-        
+
         logging.info(f"Documento {file_path.name} processado com sucesso.")
 
     except Exception as e:
         logging.error(f"Erro ao processar {file_path.name}: {e}")
-    
-   
+
+
 def clean_markdown(texto: str) -> str:
     """Limpa ruídos de OCR e metadados visuais de PDFs acadêmicos."""
     texto = unicodedata.normalize("NFKC", texto).replace("\u00ad", "")
@@ -244,13 +273,22 @@ def clean_markdown(texto: str) -> str:
         r"^\s*#*\s*[\·\-\*]?\s*REITORIA\s*$",
         r"^\s*#*\s*[\·\-\*]?\s*CAMPUS\b.*$",
         r"^\s*P([ÁA]G|[ÁA]GINA)\.?\s*\d+(\s*(de|/)\s*\d+)?\s*$",
-        r"^\s*(Rua|Av\.?|Avenida|Rod\.?|Rodovia)\s+.*\bCEP\b.*$"
+        r"^\s*(Rua|Av\.?|Avenida|Rod\.?|Rodovia)\s+.*\bCEP\b.*$",
+        r"^\s*[-]{3,}\s*$",
     ]
     padroes_compilados = [re.compile(p, flags=re.IGNORECASE) for p in padroes]
 
     palavras_institucionais = (
-        "universidade", "instituto", "colegiado", "departamento", "campus",
-        "reitoria", "pro-reitoria", "pro reitoria", "secretaria", "diretoria"
+        "universidade",
+        "instituto",
+        "colegiado",
+        "departamento",
+        "campus",
+        "reitoria",
+        "pro-reitoria",
+        "pro reitoria",
+        "secretaria",
+        "diretoria",
     )
 
     def _normalize_ascii_minusculo(valor: str) -> str:
@@ -275,8 +313,14 @@ def clean_markdown(texto: str) -> str:
             tokens_maiusculos = sum(1 for t in tokens if t == t.upper())
             razao_maiusculas = tokens_maiusculos / len(tokens)
             l_normalizada = _normalize_ascii_minusculo(l_sem_marcadores)
-            tem_palavra_institucional = any(p in l_normalizada for p in palavras_institucionais)
-            if razao_maiusculas >= 0.7 and tem_palavra_institucional and len(l_sem_marcadores) <= 120:
+            tem_palavra_institucional = any(
+                p in l_normalizada for p in palavras_institucionais
+            )
+            if (
+                razao_maiusculas >= 0.7
+                and tem_palavra_institucional
+                and len(l_sem_marcadores) <= 120
+            ):
                 continue
 
         l_normalizada = _normalize_ascii_minusculo(l_sem_marcadores)
@@ -285,13 +329,15 @@ def clean_markdown(texto: str) -> str:
         linhas_limpa.append(l)
 
     texto = "\n".join(linhas_limpa)
-        
+
     # garante que os headers tenham um espaço (corrige #Título para # Título)
-    texto = re.sub(r'^(#+)(?![\s#])', r'\1 ', texto, flags=re.MULTILINE)
+    texto = re.sub(r"^(#+)(?![\s#])", r"\1 ", texto, flags=re.MULTILINE)
 
     # remove negrito/itálico de dentro dos cabeçalhos para o header_path não ficar sujo
     # transforma '## **Capítulo I**' em '## Capítulo I'
-    texto = re.sub(r'^(#+\s+)[\*\_\-]+(.*?)([\*\_\-]+)\s*$', r'\1\2', texto, flags=re.MULTILINE)
+    texto = re.sub(
+        r"^(#+\s+)[\*\_\-]+(.*?)([\*\_\-]+)\s*$", r"\1\2", texto, flags=re.MULTILINE
+    )
 
     # normaliza espaçamento
     texto = re.sub(r"[ \t]+", " ", texto)
@@ -299,12 +345,13 @@ def clean_markdown(texto: str) -> str:
 
     return texto.strip()
 
+
 if __name__ == "__main__":
     # usa o parser na cloud
     if USE_CLOUD:
         for doc in RAW_DIR.glob("*.pdf"):
             cloud_load_data(str(doc))
-    
+
     # caso contrário, usa o parser local (docling)
     else:
         for doc in RAW_DIR.glob("*.pdf"):
