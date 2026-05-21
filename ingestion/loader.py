@@ -2,11 +2,10 @@ from docling.document_converter import DocumentConverter
 from llama_parse import LlamaParse, ResultType
 from pathlib import Path
 import json
-from typing import Optional, cast
+from typing import Optional
 from pydantic import BaseModel, Field
 from langchain_google_genai import ChatGoogleGenerativeAI
 from dotenv import load_dotenv
-import time
 import re
 import unicodedata
 import os
@@ -25,6 +24,8 @@ MARKDOWN_DIR = BASE_DIR / 'data' / 'markdown'
 
 FOLDERS = [RAW_DIR, PROCESSED_DIR, MARKDOWN_DIR]
 
+METADATA_TEXT_LIMIT = 12000
+
 PROMPT = """Você é um assistente especializado em análise de documentos acadêmicos da UFOP.
 
 Analise o texto abaixo e extraia os seguintes metadados:
@@ -38,6 +39,7 @@ Retorne apenas os dados encontrados explicitamente no texto. Não invente inform
 
 Texto:
 {text}"""
+
 class MetadadosEstruturados(BaseModel):
     """Metadados extraídos de documentos acadêmicos da UFOP via LLM."""
 
@@ -80,6 +82,33 @@ def save_json(path: Path, content: dict):
 def save_markdown(path: Path, content: str):
     with open(path, 'w', encoding='utf-8') as m:
             m.write(content)
+
+
+def extract_metadata(text: str) -> MetadadosEstruturados:
+    """
+    Extrai metadados estruturados via LLM.
+
+    Usa apenas o início do documento porque os metadados principais normalmente
+    estão no cabeçalho/primeira página, e isso evita prompts grandes demais.
+    """
+    text_sample = text.strip()[:METADATA_TEXT_LIMIT]
+    if not text_sample:
+        return MetadadosEstruturados()
+
+    try:
+        result = extrator.invoke(PROMPT.format(text=text_sample))
+    except Exception as e:
+        logging.warning(f"Falha ao extrair metadados via LLM: {e}")
+        return MetadadosEstruturados()
+
+    if isinstance(result, MetadadosEstruturados):
+        return result
+
+    if isinstance(result, dict):
+        return MetadadosEstruturados.model_validate(result)
+
+    logging.warning(f"Retorno inesperado do extrator de metadados: {type(result).__name__}")
+    return MetadadosEstruturados()
 
 def local_load_data(path: str):
     """
@@ -154,7 +183,6 @@ def cloud_load_data(path: str):
 
     try:
         # llamaparser para processamento na nuvem
-        # usa chave de api definida no env
         parser = LlamaParse(
             result_type=ResultType.MD,
             language='pt',
@@ -167,7 +195,11 @@ def cloud_load_data(path: str):
         
         result = parser.load_data(path)
         # juntando texto e extraindo metadados
-        content = ''.join(doc.text for doc in result)
+        content = clean_markdown(''.join(doc.text for doc in result))
+        if not content:
+            logging.warning(f"O documento {file_path.name} retornou vazio.")
+            return
+
         metadados = extract_metadata(content)
         
         dict_metadados = metadados.model_dump(exclude_none=True)
@@ -193,28 +225,6 @@ def cloud_load_data(path: str):
         logging.error(f"Erro ao processar {file_path.name}: {e}")
     
    
-def extract_metadata(text: str) -> MetadadosEstruturados:
-    """
-    Envia o texto do documento ao LLM para extração de metadados.
-    Em caso de falha, aguarda 5 segundos e tenta novamente. Se a segunda tentativa
-    também falhar, retorna um objeto vazio.
-
-    Args:
-        text: Conteúdo textual do documento.
-
-    Returns:
-        MetadadosEstruturados com os campos extraídos preenchidos.
-    """
-    try:
-        return cast(MetadadosEstruturados, extrator.invoke(PROMPT.format(text=text)))
-    except Exception as e:
-        print(f"Erro na extração via LLM: {e}")
-        time.sleep(5)
-        try:
-            return cast(MetadadosEstruturados, extrator.invoke(PROMPT.format(text=text)))
-        except Exception:
-            return MetadadosEstruturados()
-
 def clean_markdown(texto: str) -> str:
     """Limpa ruídos de OCR e metadados visuais de PDFs acadêmicos."""
     texto = unicodedata.normalize("NFKC", texto).replace("\u00ad", "")
@@ -275,6 +285,13 @@ def clean_markdown(texto: str) -> str:
         linhas_limpa.append(l)
 
     texto = "\n".join(linhas_limpa)
+        
+    # garante que os headers tenham um espaço (corrige #Título para # Título)
+    texto = re.sub(r'^(#+)(?![\s#])', r'\1 ', texto, flags=re.MULTILINE)
+
+    # remove negrito/itálico de dentro dos cabeçalhos para o header_path não ficar sujo
+    # transforma '## **Capítulo I**' em '## Capítulo I'
+    texto = re.sub(r'^(#+\s+)[\*\_\-]+(.*?)([\*\_\-]+)\s*$', r'\1\2', texto, flags=re.MULTILINE)
 
     # normaliza espaçamento
     texto = re.sub(r"[ \t]+", " ", texto)
@@ -283,7 +300,7 @@ def clean_markdown(texto: str) -> str:
     return texto.strip()
 
 if __name__ == "__main__":
-    # usa o parser na cluod
+    # usa o parser na cloud
     if USE_CLOUD:
         for doc in RAW_DIR.glob("*.pdf"):
             cloud_load_data(str(doc))
@@ -292,4 +309,3 @@ if __name__ == "__main__":
     else:
         for doc in RAW_DIR.glob("*.pdf"):
             local_load_data(str(doc))
-

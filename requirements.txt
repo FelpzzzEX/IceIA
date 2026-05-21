@@ -1,7 +1,12 @@
 pydantic
 python-dotenv
-qdrant-client
 llama-index
+llama-index-storage-docstore-postgres
+llama-index-vector-stores-postgres
+llama-index-embeddings-ollama
+llama-index-llms-ollama
+psycopg2-binary
+llama-parse
 redis
 langchain-google-genai
 langchain-docling

@@ -1,29 +1,29 @@
-import json
 from pathlib import Path
-from qdrant_client import QdrantClient
-from dotenv import load_dotenv
+from llama_index.llms.ollama import Ollama
+from llama_index.core.extractors import QuestionsAnsweredExtractor
+from llama_index.core.ingestion import IngestionPipeline
+from llama_index.core import Document
+from llama_index.core.node_parser import (
+    HierarchicalNodeParser,
+    MarkdownNodeParser,
+    SentenceSplitter,
+    get_leaf_nodes
+)
 
-from llama_index.core import Document, StorageContext
-from llama_index.core.node_parser import HierarchicalNodeParser, MarkdownNodeParser, SentenceSplitter
-from llama_index.storage.docstore.redis import RedisDocumentStore
-
-load_dotenv()
+PROMPT_PTBR = (
+    "Aqui está o contexto:\n"
+    "----------------\n"
+    "{context_str}\n"
+    "----------------\n"
+    "Dada a informação contextual acima, gere APENAS {num_questions} perguntas "
+    "que podem ser respondidas de forma direta por este contexto. "
+    "Escreva as perguntas em português do Brasil. "
+    "Retorne apenas as perguntas, uma por linha, sem numeração, "
+    "sem marcadores e sem textos adicionais."
+)
 
 # diretorios
 BASE_DIR = Path(__file__).parent.parent
-PROCESSED_DIR = BASE_DIR / 'data' / 'processed'
-LOG_DIR = BASE_DIR / 'data' / 'chunked_log.txt'
-
-# banco de documentos para salvar os chunks (todos os níveis da hierarquia)
-doc_store = RedisDocumentStore.from_host_and_port(
-    host='localhost',
-    port=6379,
-    namespace='documentos_iceia'
-)
-
-storage_context = StorageContext.from_defaults(
-    docstore=doc_store
-)
 
 # abordagem hierarquica: nó filho para busca (mais preciso),
 # nó pai para maior contexto (seção do markdown)
@@ -33,71 +33,65 @@ node_parsers = [
 ]
 
 node_parser = HierarchicalNodeParser(
-    node_parser_ids=['markdown', 'small'],
+    node_parser_ids=['markdown', 'sentence'],
     node_parser_map={
         'markdown': node_parsers[0],
-        'small': node_parsers[1]
+        'sentence': node_parsers[1]
     }
 )
 
-def load_log() -> str:
-    if not LOG_DIR.exists():
-        LOG_DIR.touch()
-        return ""
-    with open(LOG_DIR, 'r') as l:
-        return l.read()
+llm = Ollama(
+    model='gemma4:e2b',
+    request_timeout=120,
+    temperature=0.1
+)
 
-def save_log(file_name: str):
-    with open(LOG_DIR, 'a') as f:
-        f.write(f'{file_name}\n')
-
-def split_and_save(path: str):
+def split(json_docs: dict):
     """
-    Lê um JSON processado, divide o texto em nós hierárquicos
-    e persiste todos os nós no Redis Document Store.
-    Documentos já processados são ignorados.
+    Lê um texto, divide em nós hierárquicos (Markdown -> Sentenças)
+    e usa o Reverse HyDE nas folhas.
 
     Args:
-        path: caminho para o arquivo JSON processado.
+        text: string contendo o documento.
+        
+    Returns:
+        all_nodes: Lista com a hierarquia completa de nós
+        leaf_nodes: Lista com os nós folha enriquecidos com as perguntas
     """
-    file_name = Path(path).stem
-    log = load_log()
-    processed = set(log.splitlines())
 
-    if file_name in processed:
-        print('Arquivo já processado, pulando...')
-        return
+    text = json_docs['page_content']
+    metadata = json_docs['metadata']
 
-    print(f"Lendo o arquivo: {file_name}...")
-    with open(path, 'r', encoding='utf-8') as j:
-        markdown = json.load(j)
-
-    if isinstance(markdown, dict):
-        markdown = [markdown]
-
-    documentos_brutos = [
+    docs = [
         Document(
-            text=item.get('page_content', ''),
-            metadata=item.get('metadata', {})
+            text=text,
+            metadata=metadata,
+            excluded_llm_metadata_keys=['source']
         )
-        for item in markdown
-        if isinstance(item, dict)
+    ]
+    all_nodes = node_parser.get_nodes_from_documents(docs)
+
+    # separa entre nó raiz e nó folha
+    leaf_nodes = get_leaf_nodes(all_nodes)
+
+    # filtra nós com conteúdo insuficiente
+    leaf_nodes = [
+        node for node in leaf_nodes
+        if len(node.get_content().strip()) > 100
     ]
 
-    all_nodes = node_parser.get_nodes_from_documents(documentos_brutos)
-    storage_context.docstore.add_documents(all_nodes)
-    print(f'Salvando {len(all_nodes)} nós no Redis...')
+    # gera 3 perguntas para cada chunk (reverse hyde)
+    qa_extractor = QuestionsAnsweredExtractor(
+        llm=llm,
+        questions=3,
+        prompt_template=PROMPT_PTBR
+    )
+    
+    # aplica as transformações
+    pipeline = IngestionPipeline(
+        transformations=[qa_extractor]
+    )
 
-    save_log(file_name)
-    print(f'Arquivo {file_name} processado e adicionado ao log!')
+    enriched_leaf_nodes = pipeline.run(nodes=leaf_nodes)
 
-
-if __name__ == "__main__":
-    arquivos = list(PROCESSED_DIR.glob("*.json"))
-    print(f"Iniciando chunking de {len(arquivos)} arquivos...")
-    for doc in arquivos:
-        try:
-            split_and_save(str(doc))
-        except Exception as e:
-            print(f"Erro ao processar {doc.name}: {e}")
-            continue
+    return all_nodes, enriched_leaf_nodes
